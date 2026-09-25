@@ -1,0 +1,35 @@
+{
+  "ambiente": {
+    "tuya_ip": "192.168.18.237",
+    "tuya_device_id": "eb840a19823cfd2ef6dafd",
+    "tuya_local_key": "&v/RUt']gIyCjGr&",
+    "tuya_version": 3.3,
+    "tuya_persist": true,
+    "tuya_control_type": 1,
+    "caminho_codigos_ir": "codigos_ir.json"
+  },
+  "estado": {
+    "som": {
+      "ligado": false,
+      "entrada": "Bluetooth",
+      "volume": 100,
+      "mudo": false
+    },
+    "televisao": {
+      "ligada": false,
+      "entrada": null,
+      "volume": null,
+      "canal": null
+    },
+    "ar_condicionado": {
+      "ligado": false,
+      "display_ligado": false,
+      "windfree_ligado": false,
+      "temperatura_atual_configurada": 28,
+      "modo": null,
+      "velocidade_ventilador": null,
+      "oscilacao": null,
+      "temperatura_ambiente": null
+    }
+  }
+}

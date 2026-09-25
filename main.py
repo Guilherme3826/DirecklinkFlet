@@ -1,237 +1,197 @@
-import os
-import json
-import tinytuya
-from kivy.app import App
-from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.gridlayout import GridLayout
-from kivy.uix.button import Button
-from kivy.uix.label import Label
-from kivy.uix.scrollview import ScrollView
+from kivy.clock import Clock
 from kivy.core.window import Window
-from kivy.utils import get_color_from_hex
+from kivy.metrics import dp
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.label import Label
+from kivy.uix.popup import Popup
 
-# ==========================================
-# CONFIGURAÇÕES DO DISPOSITIVO TUYA IR
-# ==========================================
-IP_DISPOSITIVO = os.environ.get("TUYA_IP", "192.168.18.237")
-DEVICE_ID = os.environ.get("TUYA_DEVICE_ID", "eb840a19823cfd2ef6dafd")
-LOCAL_KEY = os.environ.get("TUYA_LOCAL_KEY", "AXd8$9h(b[3t}DZ~")
-CAMINHO_JSON = "codigos_ir.json"
+from kivymd.app import MDApp
 
-def carregar_codigos():
-    """Carrega o dicionário de códigos IR do arquivo JSON, com log de erros."""
-    if os.path.exists(CAMINHO_JSON):
-        try:
-            with open(CAMINHO_JSON, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"[ERRO] Falha ao carregar '{CAMINHO_JSON}': {e}")
-            return {}
-    print(f"[AVISO] Arquivo '{CAMINHO_JSON}' não encontrado. Nenhum código carregado.")
-    return {}
+from config.configuracoes import Configuracoes
+from core.controlador_ir import ControladorIR
+from core.controle_som import ControleSom
+from core.controle_tv import ControleTV
+from core.controle_ar import ControleAr
+from ui.tela_principal import TelaPrincipal
+from ui.tela_configuracoes import TelaConfiguracoes
 
-class DirectLinkMobileApp(App):
+
+class DirectLinkMobileApp(MDApp):
     def build(self):
-        Window.clearcolor = get_color_from_hex("#121212")
         self.title = "DirectLink Mobile"
 
-        # Estados e instâncias
-        self.estado_ac = {
-            "is_ac_on": False,
-            "is_display_on": True,
-            "is_windfree_on": False,
-            "ac_temperature": 24,
-        }
-        self.estado_som = {"volume": 45}
-        
-        self.codigos = carregar_codigos()
-        
+        self.theme_cls.theme_style = "Dark"
+        self.theme_cls.primary_palette = "Blue"
+
+        Window.clearcolor = self.theme_cls.bg_dark
+
+        self.cfg = Configuracoes()
+
+        # Comunicação IR e controles são inicializados depois da UI.
+        self.ir = None
+        self.som = None
+        self.tv = None
+        self.ar = None
+
+        self.ui = TelaPrincipal(self)
+
+        # Deixa a primeira renderização acontecer antes da inicialização Tuya.
+        Clock.schedule_once(self.inicializar_controladores, 0.15)
+
+        return self.ui
+
+    def inicializar_controladores(self, *_):
         try:
-            self.ir_device = tinytuya.Contrib.IRRemoteControlDevice(
-                DEVICE_ID, IP_DISPOSITIVO, LOCAL_KEY, version=3.3, persist=True
+            self.mostrar_status("Conectando ao controlador IR...")
+
+            self.ir = ControladorIR(self.cfg)
+
+            if self.ir.erro:
+                raise RuntimeError(self.ir.erro)
+
+            self.som = ControleSom(self.cfg, self.ir)
+            self.tv = ControleTV(self.ir)
+            self.ar = ControleAr(self.cfg, self.ir)
+
+            self.ui.controladores_prontos = True
+            self.ui.atualizar_controles_habilitados()
+            self.ui.atualizar("Conectado")
+
+        except Exception as erro:
+            self.ui.controladores_prontos = False
+            self.ui.atualizar_controles_habilitados()
+            self.mostrar_status("Falha na conexão")
+            self.exibir_popup_erro(
+                "Falha na inicialização",
+                str(erro)
             )
-        except Exception as e:
-            print(f"[ERRO] Falha ao inicializar dispositivo IR: {e}")
-            self.ir_device = None
 
-        # Elementos de UI
-        self.status_text = Label(text="", font_size=14, color=get_color_from_hex("#E57373"), size_hint_y=None, height=30)
-        self.texto_temp = Label(text=f"{self.estado_ac['ac_temperature']} °C", font_size=48, bold=True, size_hint_x=None, width=120)
-        self.texto_volume = Label(text=f"{self.estado_som['volume']}%", font_size=28, bold=True, size_hint_x=None, width=100)
+    def abrir_configuracoes(self):
+        TelaConfiguracoes(self).open()
 
-        # Montagem do Layout Principal
-        scroll = ScrollView(size_hint=(1, 1))
-        main_layout = BoxLayout(orientation='vertical', padding=24, spacing=20, size_hint_y=None)
-        main_layout.bind(minimum_height=main_layout.setter('height'))
+    def controladores_disponiveis(self):
+        return all(
+            (
+                self.ir is not None,
+                self.som is not None,
+                self.tv is not None,
+                self.ar is not None,
+            )
+        )
 
-        main_layout.add_widget(self.status_text)
-        main_layout.add_widget(self.criar_card_som())
-        main_layout.add_widget(self.criar_card_tv())
-        main_layout.add_widget(self.criar_card_ac())
-
-        scroll.add_widget(main_layout)
-        return scroll
-
-    def mostrar_status(self, msg: str):
-        self.status_text.text = msg
-
-    def enviar_comando(self, nome_comando):
-        codigo_base64 = self.codigos.get(nome_comando)
-        if not self.ir_device:
-            print("[AVISO] Dispositivo IR não inicializado.")
-            self.mostrar_status("Dispositivo IR indisponível.")
+    def executar(self, funcao, *args):
+        if not self.controladores_disponiveis():
+            self.mostrar_status(
+                "Aguarde a conexão com o controlador IR."
+            )
             return
-        if not codigo_base64:
-            print(f"[AVISO] Comando '{nome_comando}' não encontrado no JSON.")
-            self.mostrar_status(f"Comando '{nome_comando}' não encontrado.")
-            return
+
         try:
-            self.ir_device.send_button(codigo_base64)
-            print(f"Comando enviado: {nome_comando}")
-            self.mostrar_status("")
-        except Exception as e:
-            print(f"[ERRO] Falha ao enviar comando '{nome_comando}': {e}")
-            self.mostrar_status("Falha ao enviar comando (dispositivo offline?).")
+            funcao(*args)
+            self.ui.atualizar("Comando enviado")
 
-    # ==========================================
-    # LÓGICAS DO AR-CONDICIONADO
-    # ==========================================
-    def sincronizar_estado_ac(self):
-        if not self.estado_ac["is_ac_on"]:
-            self.enviar_comando("AC_Desligar")
-            return
+        except Exception as erro:
+            self.mostrar_status("Falha ao executar comando")
+            self.exibir_popup_erro("Erro", str(erro))
 
-        temp = str(self.estado_ac["ac_temperature"])
-        wf = self.estado_ac["is_windfree_on"]
-        disp = self.estado_ac["is_display_on"]
+    def mostrar_status(self, mensagem):
+        if getattr(self, "ui", None) is not None:
+            self.ui.atualizar(mensagem)
 
-        if not wf and not disp:
-            comando = f"AC_WindFreeOff_DisplayOff_T{temp}"
-        elif wf and not disp:
-            comando = f"AC_WindFreeOn_DisplayOff_T{temp}"
-        elif not wf and disp:
-            comando = f"AC_WindFreeOff_DisplayOn_T{temp}"
-        else:
-            comando = f"AC_WindFreeOn_DisplayOn_T{temp}"
+    def exibir_popup_erro(self, titulo, mensagem):
+        conteudo = BoxLayout(
+            orientation="vertical",
+            padding=dp(18),
+            spacing=dp(14)
+        )
 
-        self.enviar_comando(comando)
+        texto = Label(
+            text=str(mensagem),
+            halign="center",
+            valign="middle"
+        )
+        texto.bind(size=texto.setter("text_size"))
 
-    def toggle_ac_power(self, instance):
-        self.estado_ac["is_ac_on"] = not self.estado_ac["is_ac_on"]
-        self.sincronizar_estado_ac()
+        fechar = Label(
+            text="FECHAR",
+            size_hint_y=None,
+            height=dp(48),
+            halign="center",
+            valign="middle"
+        )
 
-    def toggle_ac_lights(self, instance):
-        self.estado_ac["is_display_on"] = not self.estado_ac["is_display_on"]
-        if self.estado_ac["is_ac_on"]:
-            self.sincronizar_estado_ac()
+        from kivy.uix.button import Button
+        botao = Button(
+            text="Fechar",
+            size_hint_y=None,
+            height=dp(50)
+        )
 
-    def toggle_windfree(self, instance):
-        self.estado_ac["is_windfree_on"] = not self.estado_ac["is_windfree_on"]
-        if self.estado_ac["is_ac_on"]:
-            self.sincronizar_estado_ac()
+        conteudo.add_widget(texto)
+        conteudo.add_widget(botao)
 
-    def increase_temp(self, instance):
-        if self.estado_ac["ac_temperature"] < 30:
-            self.estado_ac["ac_temperature"] += 1
-            self.texto_temp.text = f"{self.estado_ac['ac_temperature']} °C"
-            if self.estado_ac["is_ac_on"]:
-                self.sincronizar_estado_ac()
+        popup = Popup(
+            title=titulo,
+            content=conteudo,
+            size_hint=(0.88, 0.42),
+            auto_dismiss=False
+        )
 
-    def decrease_temp(self, instance):
-        if self.estado_ac["ac_temperature"] > 16:
-            self.estado_ac["ac_temperature"] -= 1
-            self.texto_temp.text = f"{self.estado_ac['ac_temperature']} °C"
-            if self.estado_ac["is_ac_on"]:
-                self.sincronizar_estado_ac()
+        botao.bind(on_release=popup.dismiss)
+        popup.open()
 
-    # ==========================================
-    # LÓGICAS DO SOM
-    # ==========================================
-    def increase_volume(self, instance):
-        if self.estado_som["volume"] < 100:
-            self.estado_som["volume"] += 5
-            self.texto_volume.text = f"{self.estado_som['volume']}%"
-            self.enviar_comando("EDF_AumentarVolume")
+    def volume_text(self):
+        volume = self.cfg.estado["som"].get("volume", 45)
+        return f"{volume}%"
 
-    def decrease_volume(self, instance):
-        if self.estado_som["volume"] > 0:
-            self.estado_som["volume"] -= 5
-            self.texto_volume.text = f"{self.estado_som['volume']}%"
-            self.enviar_comando("EDF_DiminuirVolume")
+    def temp_text(self):
+        temperatura = self.cfg.estado["ar_condicionado"].get(
+            "temperatura_atual_configurada",
+            24
+        )
+        return f"{temperatura}°"
 
-    # ==========================================
-    # CONSTRUÇÃO DA INTERFACE (UI KIVY)
-    # ==========================================
-    def criar_card_som(self):
-        layout = BoxLayout(orientation='vertical', padding=20, spacing=10, size_hint_y=None, height=220)
-        
-        layout.add_widget(Label(text="SISTEMA DE SOM", bold=True, size_hint_y=None, height=30))
-        layout.add_widget(Button(text="Ligar / Desligar Sistema", on_press=lambda x: self.enviar_comando("EDF_LigarDesligar"), size_hint_y=None, height=40))
-        
-        layout.add_widget(Label(text="Modo de Entrada", color=get_color_from_hex("#9E9E9E"), size_hint_y=None, height=20))
-        botoes_entrada = BoxLayout(orientation='horizontal', spacing=10, size_hint_y=None, height=40)
-        botoes_entrada.add_widget(Button(text="Bluetooth", on_press=lambda x: self.enviar_comando("EDF_Bluetooth")))
-        botoes_entrada.add_widget(Button(text="Coaxial", on_press=lambda x: self.enviar_comando("EDF_Coaxial")))
-        botoes_entrada.add_widget(Button(text="Óptico", on_press=lambda x: self.enviar_comando("EDF_Optico")))
-        layout.add_widget(botoes_entrada)
+    def som_power(self):
+        self.som.power()
 
-        layout.add_widget(Label(text="Volume", color=get_color_from_hex("#9E9E9E"), size_hint_y=None, height=20))
-        controles_volume = BoxLayout(orientation='horizontal', size_hint_y=None, height=50)
-        controles_volume.add_widget(Button(text="-", font_size=24, on_press=self.decrease_volume))
-        controles_volume.add_widget(self.texto_volume)
-        controles_volume.add_widget(Button(text="+", font_size=24, on_press=self.increase_volume))
-        layout.add_widget(controles_volume)
-        
-        return layout
+    def som_entrada(self, nome):
+        self.som.entrada(nome)
 
-    def criar_card_tv(self):
-        layout = BoxLayout(orientation='vertical', padding=20, spacing=10, size_hint_y=None, height=300)
-        
-        layout.add_widget(Label(text="TELEVISÃO", bold=True, size_hint_y=None, height=30))
-        
-        botoes_topo = BoxLayout(orientation='horizontal', spacing=10, size_hint_y=None, height=40)
-        botoes_topo.add_widget(Button(text="Power", on_press=lambda x: self.enviar_comando("TV_Liga_Desliga")))
-        botoes_topo.add_widget(Button(text="Menu", on_press=lambda x: self.enviar_comando("TV_Command_Home")))
-        layout.add_widget(botoes_topo)
+    def som_volume(self, delta):
+        self.som.volume(delta)
 
-        # D-Pad Simulado
-        dpad = GridLayout(cols=3, rows=3, size_hint_y=None, height=150, spacing=5)
-        dpad.add_widget(Label(text="")) # Vazio superior esquerdo
-        dpad.add_widget(Button(text="Cima", on_press=lambda x: self.enviar_comando("TV_Cursor_Cima")))
-        dpad.add_widget(Label(text="")) # Vazio superior direito
-        
-        dpad.add_widget(Button(text="Esq", on_press=lambda x: self.enviar_comando("TV_Cursor_Esquerda")))
-        dpad.add_widget(Button(text="OK", on_press=lambda x: self.enviar_comando("TV_Command_OK")))
-        dpad.add_widget(Button(text="Dir", on_press=lambda x: self.enviar_comando("TV_Cursor_Direita")))
-        
-        dpad.add_widget(Label(text="")) # Vazio inferior esquerdo
-        dpad.add_widget(Button(text="Baixo", on_press=lambda x: self.enviar_comando("TV_Cursor_Baixo")))
-        dpad.add_widget(Label(text="")) # Vazio inferior direito
-        layout.add_widget(dpad)
+    def tv_comando(self, comando):
+        self.tv.comando(comando)
 
-        layout.add_widget(Button(text="Voltar", on_press=lambda x: self.enviar_comando("TV_Command_Return"), size_hint_y=None, height=40))
-        
-        return layout
+    def ar_power(self):
+        self.ar.alterar(
+            ligado=not self.ar.estado["ligado"]
+        )
 
-    def criar_card_ac(self):
-        layout = BoxLayout(orientation='vertical', padding=20, spacing=10, size_hint_y=None, height=200)
-        
-        layout.add_widget(Label(text="AR-CONDICIONADO", bold=True, size_hint_y=None, height=30))
-        
-        botoes_topo = BoxLayout(orientation='horizontal', spacing=10, size_hint_y=None, height=40)
-        botoes_topo.add_widget(Button(text="Ligar AC", on_press=self.toggle_ac_power))
-        botoes_topo.add_widget(Button(text="Luzes", on_press=self.toggle_ac_lights))
-        layout.add_widget(botoes_topo)
+    def ar_temp(self, delta):
+        atual = int(
+            self.ar.estado.get(
+                "temperatura_atual_configurada",
+                24
+            )
+        )
+        nova = max(16, min(30, atual + delta))
 
-        controles_temp = BoxLayout(orientation='horizontal', size_hint_y=None, height=60)
-        controles_temp.add_widget(Button(text="-", font_size=36, on_press=self.decrease_temp))
-        controles_temp.add_widget(self.texto_temp)
-        controles_temp.add_widget(Button(text="+", font_size=36, on_press=self.increase_temp))
-        layout.add_widget(controles_temp)
+        if nova != atual:
+            self.ar.alterar(
+                temperatura_atual_configurada=nova
+            )
 
-        layout.add_widget(Button(text="Ativar WindFree", on_press=self.toggle_windfree, size_hint_y=None, height=40))
-        
-        return layout
+    def ar_windfree(self):
+        self.ar.alterar(
+            windfree_ligado=not self.ar.estado["windfree_ligado"]
+        )
+
+    def ar_display(self):
+        self.ar.alterar(
+            display_ligado=not self.ar.estado["display_ligado"]
+        )
+
 
 if __name__ == "__main__":
     DirectLinkMobileApp().run()
